@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}CJDropshipping Settings{% endblock %}
+{% block content %}
+<h1>CJDropshipping Supplier</h1>
+<div class="card">
+    <form method="post" action="/admin/suppliers/cjdropshipping/save" class="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group"><label for="api_key">API Key</label><input type="password" id="api_key" name="api_key" value="{{ config.get('api_key', '') }}" /></div>
+        <div class="form-group"><label><input type="checkbox" name="is_active" {% if config.get('is_active') %}checked{% endif %} /> Active</label></div>
+        <p style="color:var(--clr-text-muted);font-size:0.9em;">Access tokens are refreshed automatically and stored in addon config after catalog sync.</p>
+        <button type="submit" class="btn btn--primary">Save</button>
+    </form>
+</div>
+<div class="card" style="margin-top:1.5em;">
+    <form method="post" action="/admin/suppliers/cjdropshipping/sync" class="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <select name="import_status"><option value="draft">Draft</option><option value="published">Published</option></select>
+        <label><input type="checkbox" name="archive_missing" /> Archive missing</label>
+        <button type="submit" class="btn btn--secondary">Sync catalog</button>
+    </form>
+</div>
+<p><a href="/admin/suppliers">← Back</a></p>
+{% endblock %}
