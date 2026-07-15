@@ -1,0 +1,9 @@
+{
+  "addon_id": "cjdropshipping",
+  "addon_name": "CJDropshipping",
+  "addon_description": "Dropshipping catalog and fulfillment via CJ API 2.0.",
+  "category": "supplier",
+  "version": "1.0.0",
+  "min_oshkelosh_version": "0.1.0",
+  "python_requires": ">=3.11"
+}
