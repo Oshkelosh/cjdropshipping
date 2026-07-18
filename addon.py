@@ -10,15 +10,23 @@ from pydantic import BaseModel, Field, SecretStr
 from app.addons.suppliers.base import SupplierAddon
 from app.addons.suppliers.catalog_utils import row_lacks_variant_list, variant_dicts_from_row
 from app.addons.suppliers.cjdropshipping.catalog import normalize_cj_catalog_products
-from app.addons.suppliers.cjdropshipping.client import CJDropshippingAPIError, CJDropshippingClient
+from app.addons.suppliers.cjdropshipping.client import (
+    CJDropshippingAPIError,
+    CJDropshippingClient,
+    parse_freight_options,
+)
 from schemas.supplier import SupplierCatalogProduct
-from app.addons.log import info, warning
+from app.addons.log import exception, info, warning
 from app.addons.config_serialization import dump_addon_config
 
 
 class CJDropshippingConfig(BaseModel):
     api_key: SecretStr = Field(default=..., description="CJ API key")
     is_active: bool = Field(default=False)
+    warehouse_country: str = Field(
+        default="CN",
+        description="Origin country code used for shipping-rate quotes (ISO alpha-2)",
+    )
     access_token: str = Field(default="", description="Managed by addon after auth")
     refresh_token: str = Field(default="", description="Managed by addon after auth")
     token_expires_at: float = Field(default=0, description="Unix timestamp for access token expiry")
@@ -29,16 +37,19 @@ class CJDropshippingConfig(BaseModel):
 
 
 def _map_shipping(address: Dict[str, Any]) -> Dict[str, Any]:
+    from app.addons.suppliers.address import canonical_address
+
+    addr = canonical_address(address)
     return {
-        "shippingCountryCode": address.get("country", ""),
-        "shippingProvince": address.get("state", ""),
-        "shippingCity": address.get("city", ""),
-        "shippingAddress": address.get("line1", ""),
-        "shippingAddress2": address.get("line2", ""),
-        "shippingZip": address.get("zip", ""),
-        "shippingCustomerName": f"{address.get('first_name', '')} {address.get('last_name', '')}".strip(),
-        "shippingPhone": address.get("phone", ""),
-        "shippingCustomerEmail": address.get("email", ""),
+        "shippingCountryCode": addr["country_code"],
+        "shippingProvince": addr["state"],
+        "shippingCity": addr["city"],
+        "shippingAddress": addr["line1"],
+        "shippingAddress2": addr["line2"],
+        "shippingZip": addr["zip"],
+        "shippingCustomerName": addr["name"],
+        "shippingPhone": addr["phone"],
+        "shippingCustomerEmail": addr["email"],
     }
 
 
@@ -189,6 +200,83 @@ class CJDropshippingAddon(SupplierAddon):
                 return row
         return {"error": f"CJ product '{product_id}' not found"}
 
+    def supports_shipping_quotes(self) -> bool:
+        return True
+
+    async def quote_shipping(
+        self,
+        items: List[Dict[str, Any]],
+        shipping_address: Dict[str, Any],
+        *,
+        currency: str | None = None,
+    ) -> int | None:
+        """Live CJ freight; cheapest option. None → Site Settings.
+
+        CJ freight requires an origin warehouse country (``warehouse_country``
+        config, default CN). CJ stocks the same variant across warehouses, so
+        this is a per-account default rather than per-product truth.
+        """
+        details = await self.quote_shipping_details(items, shipping_address, currency=currency)
+        if details is None:
+            return None
+        return int(details["cents"])
+
+    async def quote_shipping_details(
+        self,
+        items: List[Dict[str, Any]],
+        shipping_address: Dict[str, Any],
+        *,
+        selected_id: str | None = None,
+        currency: str | None = None,
+    ) -> Dict[str, Any] | None:
+        """Live CJ logistics options; selected_id overrides the cheapest default."""
+        if currency and str(currency).upper() != "USD":
+            # CJ freightCalculate prices are USD only; don't present them as
+            # another shop currency. Fall back to Site Settings shipping.
+            return None
+        from app.services.countries import normalize_country_code
+        from app.addons.suppliers.shipping_quote import pick_shipping_option
+
+        client = self._require_client()
+        cfg = self._config or {}
+        try:
+            country_raw = (shipping_address or {}).get("country") or (
+                shipping_address or {}
+            ).get("country_code")
+            end_country = normalize_country_code(str(country_raw) if country_raw else None)
+            if not end_country:
+                return None
+            start_country = str(cfg.get("warehouse_country") or "CN").strip().upper() or "CN"
+            products = []
+            for item in items:
+                vid = str(item.get("supplier_variant_id") or "").strip()
+                if not vid:
+                    continue
+                products.append({"vid": vid, "quantity": int(item.get("quantity") or 1)})
+            if not products:
+                return None
+            data = await client.calculate_freight(products, start_country, end_country)
+            self._sync_tokens_to_config()
+            options = parse_freight_options(data)
+            chosen = pick_shipping_option(
+                options,
+                selected_id=selected_id,
+                preferred_ids=(),
+            )
+            if chosen is None:
+                return None
+            return {
+                "cents": int(chosen["cents"]),
+                "selected_id": str(chosen["id"]),
+                "options": options,
+            }
+        except CJDropshippingAPIError as exc:
+            warning("CJDropshipping", "quote_shipping error: {}", exc)
+            return None
+        except Exception:
+            exception("CJDropshipping", "quote_shipping unexpected error")
+            return None
+
     async def create_order(
         self,
         items: List[Dict[str, Any]],
@@ -196,8 +284,10 @@ class CJDropshippingAddon(SupplierAddon):
         *,
         external_id: str | None = None,
         supplier_ref: str | None = None,
+        shipping_method: str | None = None,
+        currency: str | None = None,
     ) -> Dict[str, Any]:
-        del supplier_ref
+        del supplier_ref, currency
         client = self._require_client()
         try:
             products = []
@@ -222,6 +312,9 @@ class CJDropshippingAddon(SupplierAddon):
             }
             if external_id:
                 payload["orderNumber"] = external_id
+            logistic = (shipping_method or "").strip()
+            if logistic:
+                payload["logisticName"] = logistic
 
             data = await client.create_order(payload)
             self._sync_tokens_to_config()

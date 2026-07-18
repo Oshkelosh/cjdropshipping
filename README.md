@@ -26,6 +26,7 @@ Multiple suppliers can be enabled at the same time. Fulfillment runs when an ord
 |-------|------|-------------|
 | `api_key` | secret | CJ API key |
 | `is_active` | bool | Whether the addon is active |
+| `warehouse_country` | string | Origin country (ISO alpha-2) used for shipping-rate quotes (default `CN`) |
 | `access_token` | string | Managed by addon after OAuth (do not edit manually) |
 | `refresh_token` | string | Managed by addon after OAuth |
 | `token_expires_at` | float | Access token expiry (Unix timestamp) |
@@ -50,6 +51,7 @@ Multiple suppliers can be enabled at the same time. Fulfillment runs when an ord
 
 - **Variant supplier fields:** paid-order fulfillment reads CJ product/variant IDs from each **ProductVariant** row
 - **Fulfillment:** places CJ order via API 2.0; OAuth tokens refreshed automatically via `export_config_updates()`
+- **Checkout shipping:** core calls `quote_shipping()` → `POST /logistic/freightCalculate` (origin = `warehouse_country`, cheapest freight option). CJ stocks a variant across multiple warehouses, so `warehouse_country` is a per-account default, not per-product truth; wrong/missing origins simply fall back to Site Settings.
 - **Grouping:** line items grouped by fulfillment key `cjdropshipping`
 
 ## Variant supplier fields

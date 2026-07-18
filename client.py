@@ -143,6 +143,21 @@ class CJDropshippingClient:
             raise CJDropshippingAPIError("pid, product_sku, or variant_sku is required")
         return await self._request("GET", "/product/query", params=params)
 
+    async def calculate_freight(
+        self,
+        products: list[dict[str, Any]],
+        start_country: str,
+        end_country: str,
+    ) -> Any:
+        """POST /logistic/freightCalculate — shipping options for a cart."""
+        await self.ensure_token()
+        body = {
+            "startCountryCode": start_country,
+            "endCountryCode": end_country,
+            "products": products,
+        }
+        return await self._request("POST", "/logistic/freightCalculate", json=body)
+
     async def create_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         await self.ensure_token()
         data = await self._request("POST", "/shopping/order/createOrder", json=payload)
@@ -152,3 +167,50 @@ class CJDropshippingClient:
         await self.ensure_token()
         data = await self._request("GET", f"/shopping/order/getOrderDetail", params={"orderId": order_id})
         return data if isinstance(data, dict) else {"result": data}
+
+
+def _freight_option_list(options: Any) -> list[dict[str, Any]]:
+    if isinstance(options, dict):
+        for key in ("data", "list"):
+            val = options.get(key)
+            if isinstance(val, list):
+                options = val
+                break
+    if not isinstance(options, list):
+        return []
+    return [row for row in options if isinstance(row, dict)]
+
+
+def parse_freight_options(options: Any) -> list[dict[str, Any]]:
+    """Normalize CJ freightCalculate rows into checkout options."""
+    from app.addons.suppliers.shipping_quote import to_cents
+
+    parsed: list[dict[str, Any]] = []
+    for option in _freight_option_list(options):
+        cents = to_cents(option.get("logisticPrice"))
+        if cents is None:
+            continue
+        name = str(
+            option.get("logisticName") or option.get("logisticAgeName") or ""
+        ).strip()
+        code = str(option.get("logisticCode") or "").strip()
+        option_id = name or code or f"option-{len(parsed) + 1}"
+        parsed.append(
+            {
+                "id": option_id,
+                "name": name or option_id,
+                "cents": cents,
+            }
+        )
+    return parsed
+
+
+def pick_freight_cents(options: Any) -> int | None:
+    """CJ returns a list of logistics options; pick the cheapest ``logisticPrice``.
+
+    Amounts are USD decimal strings. Returns ``None`` when nothing can be priced.
+    """
+    from app.addons.suppliers.shipping_quote import pick_shipping_option
+
+    chosen = pick_shipping_option(parse_freight_options(options), preferred_ids=())
+    return int(chosen["cents"]) if chosen else None
